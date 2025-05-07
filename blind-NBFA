@@ -1,0 +1,253 @@
+import os
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.layers import Conv2D, LayerNormalization, Input, Add, Multiply, GlobalAveragePooling2D, Reshape, Lambda
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.optimizers import Adam
+from sklearn.model_selection import train_test_split
+from PIL import Image
+import zipfile
+import glob
+
+# 设置TensorFlow使用GPU
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        # 设置GPU内存增长
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        # 设置使用GPU
+        tf.config.set_visible_devices(gpus[0], 'GPU')
+        print("GPU配置成功")
+    except RuntimeError as e:
+        print("GPU配置失败")
+        print(e)
+
+# 盲卷积实现
+class BlindDeconvolutionLayer(tf.keras.layers.Layer):
+    def __init__(self, filters, kernel_size, strides=1, padding='same'):
+        super(BlindDeconvolutionLayer, self).__init__()
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+
+    def build(self, input_shape):
+        self.kernel = self.add_weight(
+            shape=(self.kernel_size, self.kernel_size, input_shape[-1], self.filters),
+            initializer='glorot_uniform',
+            trainable=True,
+            name='blind_conv_kernel'
+        )
+
+    def call(self, inputs):
+        outputs = tf.nn.conv2d(inputs, self.kernel, strides=self.strides, padding=self.padding.upper())
+        return outputs
+
+# NAFBlock实现
+class NAFBlock(tf.keras.layers.Layer):
+    def __init__(self, c, DW_Expand=2, FFN_Expand=2, drop_out_rate=0.):
+        super(NAFBlock, self).__init__()
+        dw_channel = c * DW_Expand
+        self.conv1 = Conv2D(dw_channel, kernel_size=1, padding='same')
+        self.conv2 = Conv2D(dw_channel, kernel_size=3, padding='same', groups=dw_channel)
+        self.conv3 = Conv2D(dw_channel // 2, kernel_size=1, padding='same')
+
+        # Simplified Channel Attention
+        self.sca = tf.keras.Sequential([
+            GlobalAveragePooling2D(),
+            Reshape((1, 1, c)),
+            Conv2D(dw_channel // 2, kernel_size=1, padding='same')
+        ])
+
+        # SimpleGate
+        self.sg = Lambda(lambda x: x[:, :, :, :dw_channel//2] * x[:, :, :, dw_channel//2:])
+
+        ffn_channel = FFN_Expand * c
+        self.conv4 = Conv2D(ffn_channel, kernel_size=1, padding='same')
+        self.conv5 = Conv2D(c, kernel_size=1, padding='same')
+
+        self.norm1 = LayerNormalization(epsilon=1e-5)
+        self.norm2 = LayerNormalization(epsilon=1e-5)
+
+        self.dropout1 = tf.keras.layers.Dropout(drop_out_rate)
+        self.dropout2 = tf.keras.layers.Dropout(drop_out_rate)
+
+        self.beta = tf.Variable(tf.zeros((1, 1, 1, c)), trainable=True)
+        self.gamma = tf.Variable(tf.zeros((1, 1, 1, c)), trainable=True)
+
+    def call(self, inp):
+        x = inp
+
+        x = self.norm1(x)
+
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.sg(x)
+        x = Multiply()([x, self.sca(x)])
+        x = self.conv3(x)
+
+        x = self.dropout1(x)
+
+        y = Add()([inp, x * self.beta])
+
+        x = self.conv4(self.norm2(y))
+        x = self.sg(x)
+        x = self.conv5(x)
+
+        x = self.dropout2(x)
+
+        return Add()([y, x * self.gamma])
+
+def modified_dncnn_model(depth=12, n_channels=48, image_channels=3, kernel_size=3):
+    inputs = Input(shape=(None, None, image_channels))
+    x = Conv2D(n_channels, kernel_size, padding='same')(inputs)
+    
+    for _ in range(depth - 2):
+        # 每隔两层传统卷积层添加一层盲卷积层
+        x = NAFBlock(n_channels)(x)
+        if _ % 3 == 0:
+            x = BlindDeconvolutionLayer(n_channels, kernel_size, padding='same')(x)
+    
+    x = Conv2D(image_channels, kernel_size, padding='same')(x)
+    outputs = tf.keras.layers.Subtract()([inputs, x])
+    outputs = tf.keras.layers.Activation('tanh')(outputs)
+    return Model(inputs, outputs)
+
+# 计算PSNR
+def psnr(y_true, y_pred):
+    mse = tf.reduce_mean(tf.square(y_true - y_pred))
+    max_pixel = 1.0
+    psnr = 10 * tf.math.log(max_pixel / mse) / tf.math.log(10.0)
+    return tf.where(tf.math.is_inf(psnr), tf.constant(float('inf')), psnr)
+
+# 计算SSIM
+def ssim(y_true, y_pred):
+    return tf.image.ssim(y_true, y_pred, max_val=1.0)
+
+# 数据预处理（用于训练和验证）
+def load_and_preprocess_image_train(image_path, target_size=(256, 256)):
+    img = Image.open(image_path)
+    img = img.resize(target_size)
+    img = np.array(img) / 127.5 - 1.0  # 调整到 [-1, 1] 范围
+    return img
+
+# 数据预处理（用于推理，保持原始分辨率）
+def load_and_preprocess_image_inference(image_path):
+    img = Image.open(image_path)
+    img = np.array(img) / 127.5 - 1.0  # 调整到 [-1, 1] 范围
+    return img
+
+# 准备数据集（用于训练和验证）
+def prepare_datasets(noisy_dir, gt_dir, target_size=(256, 256), num_samples=1000):
+    noisy_images = []
+    gt_images = []
+    for i, (noisy_path, gt_path) in enumerate(zip(sorted(glob.glob(os.path.join(noisy_dir, '*'))), sorted(glob.glob(os.path.join(gt_dir, '*'))))):
+        if i >= num_samples:
+            break
+        noisy_img = load_and_preprocess_image_train(noisy_path, target_size)
+        gt_img = load_and_preprocess_image_train(gt_path, target_size)
+        noisy_images.append(noisy_img)
+        gt_images.append(gt_img)
+    return np.array(noisy_images), np.array(gt_images)
+
+# 自定义早停回调
+class CustomEarlyStopping(EarlyStopping):
+    def __init__(self, patience=0):
+        super().__init__(monitor='val_psnr', patience=patience, restore_best_weights=True, mode='max')
+        self.best_epoch = 0
+
+    def on_epoch_end(self, epoch, logs=None):
+        super().on_epoch_end(epoch, logs)
+        if self.model.stop_training:
+            self.best_epoch = epoch
+
+# 自定义模型检查点回调
+class CustomModelCheckpoint(tf.keras.callbacks.Callback):
+    def __init__(self, filepath):
+        super().__init__()
+        self.filepath = filepath
+        self.best_psnr = 0.0
+
+    def on_epoch_end(self, epoch, logs=None):
+        val_psnr = logs.get('val_psnr')
+        if val_psnr > self.best_psnr:
+            self.best_psnr = val_psnr
+            self.model.save_weights(self.filepath)
+            print(f"模型保存！PSNR: {self.best_psnr:.4f}dB")
+
+# 数据集路径
+train_noisy_dir = "/kaggle/input/realblurj-image-deblurring-dataset/RealBlur/train/blur"
+train_gt_dir = "/kaggle/input/realblurj-image-deblurring-dataset/RealBlur/train/gt"
+test_noisy_dir = "/kaggle/input/realblurj-image-deblurring-dataset/RealBlur/test/blur"
+test_gt_dir = "/kaggle/input/realblurj-image-deblurring-dataset/RealBlur/test/gt"
+
+# 加载数据集
+X_train, y_train = prepare_datasets(train_noisy_dir, train_gt_dir, num_samples=1000)
+X_test, y_test = prepare_datasets(test_noisy_dir, test_gt_dir)
+
+# 定义模型
+model = modified_dncnn_model()
+model.compile(optimizer=Adam(learning_rate=1e-4), loss='mse', metrics=[psnr, ssim])
+
+# 自定义模型检查点回调，保存PSNR最高的模型
+model_checkpoint = CustomModelCheckpoint('/kaggle/working/best_model.weights.h5')
+
+# 训练模型
+history = model.fit(X_train, y_train, 
+                    validation_data=(X_test, y_test),
+                    epochs=40, 
+                    batch_size=4,
+                    callbacks=[CustomEarlyStopping(patience=8), model_checkpoint])
+
+# 加载最佳模型
+model.load_weights('/kaggle/working/best_model.weights.h5')
+
+# 使用模型进行去模糊并保存结果（保持原始分辨率）
+def deblur_and_save(input_dir, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    for filename in os.listdir(input_dir):
+        if filename.endswith(('.jpg', '.png')):
+            input_path = os.path.join(input_dir, filename)
+            output_path = os.path.join(output_dir, filename)
+            img = load_and_preprocess_image_inference(input_path)
+            original_shape = img.shape  # 保存原始图片的形状
+            img = np.expand_dims(img, axis=0)  # 添加批次维度
+            
+            # 使用模型进行去模糊预测
+            deblurred = model.predict(img)
+            deblurred = np.squeeze(deblurred, axis=0)  # 移除批次维度
+            
+            # 确保去模糊后的图片与原始图片形状一致
+            deblurred = deblurred[:original_shape[0], :original_shape[1], :]
+            
+            # 反归一化到 [0, 255] 范围
+            deblurred = (deblurred + 1.0) * 127.5
+            deblurred = deblurred.astype(np.uint8)
+            
+            # 保存去模糊后的图像
+            deblurred_img = Image.fromarray(deblurred)
+            deblurred_img.save(output_path)
+            print(f"处理完成：{output_path}")
+
+# 去模糊并保存结果
+input_dir = r"/kaggle/input/bisaishuju/给参赛者下载的数据/竞赛数据/Data"
+output_dir = r"/kaggle/working/deblurred_results"
+deblur_and_save(input_dir, output_dir)
+
+# 将结果打包成压缩文件
+def file2zip(packagePath, zipPath):
+    zip_file = zipfile.ZipFile(zipPath, 'w', zipfile.ZIP_DEFLATED)
+    for path, dirNames, fileNames in os.walk(packagePath):
+        fpath = path.replace(packagePath, '')
+        for name in fileNames:
+            fullName = os.path.join(path, name)
+            name = fpath + '/' + name
+            zip_file.write(fullName, name)
+    zip_file.close()
+
+packagePath = '/kaggle/working/deblurred_results'
+zipPath = '/kaggle/working/output.zip'
+file2zip(packagePath, zipPath)
+print("打包完成")
