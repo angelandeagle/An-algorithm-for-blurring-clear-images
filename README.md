@@ -36,3 +36,24 @@ class BlindDeconvolutionLayer(tf.keras.layers.Layer):
     def call(self, inputs):  
         outputs = tf.nn.conv2d(inputs, self.kernel, strides=self.strides, padding=self.padding.upper())  
         return outputs    
+
+# 盲卷积实现
+class BlindDeconvolutionLayer(tf.keras.layers.Layer):
+    def __init__(self, filters, kernel_size, strides=1, padding='same'):
+        super(BlindDeconvolutionLayer, self).__init__()
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+
+    def build(self, input_shape):
+        self.kernel = self.add_weight(
+            shape=(self.kernel_size, self.kernel_size, input_shape[-1], self.filters),
+            initializer='glorot_uniform',
+            trainable=True,
+            name='blind_conv_kernel'
+        )
+
+    def call(self, inputs):
+        outputs = tf.nn.conv2d(inputs, self.kernel, strides=self.strides, padding=self.padding.upper())
+        return outputs
