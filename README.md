@@ -5,7 +5,7 @@ blind-unet 最终PSNR为19.21
 blind-NBFA 最终PSNR为22.03  
 
 
-盲卷积模块知识    
+# 盲卷积模块知识    
 定义：    
   盲卷积是在不知道模糊核（Point Spread Function，PSF）信息的情况下，通过算法从模糊图像中恢复出清晰图像的过程。传统去卷积方法需要已知模糊核，而盲卷积无需先验知识，能同时估计模糊核和恢复原始图像。  
 图像模型:
@@ -16,9 +16,9 @@ blind-NBFA 最终PSNR为22.03
 -h 是卷积核(未知，要估计的)。  
 -n 是噪声(通常假设为高斯白噪声)。  
 ![image](https://github.com/angelandeagle/An-algorithm-for-blurring-clear-images/blob/main/%E5%8E%BB%E7%87%A5%E7%9F%A5%E8%AF%86/image.png)
-我们对这个图片进行逆操作，就相当于对图片进行去燥。  
+简单的说，我们对这个图片进行逆操作，就相当于对图片进行去燥。  
 对应模块代码：
-# 盲卷积实现
+盲卷积实现
 class BlindDeconvolutionLayer(tf.keras.layers.Layer):
     def __init__(self, filters, kernel_size, strides=1, padding='same'):
         super(BlindDeconvolutionLayer, self).__init__()
