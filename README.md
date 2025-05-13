@@ -18,8 +18,6 @@ blind-NBFA 最终PSNR为22.03
 ![image](https://github.com/angelandeagle/An-algorithm-for-blurring-clear-images/blob/main/%E5%8E%BB%E7%87%A5%E7%9F%A5%E8%AF%86/image.png)
 简单的说，我们对这个图片进行逆操作，就相当于对图片进行去燥。      
 对应模块代码：  
-'''
-# 盲卷积实现
 class BlindDeconvolutionLayer(tf.keras.layers.Layer):
     def __init__(self, filters, kernel_size, strides=1, padding='same'):
         super(BlindDeconvolutionLayer, self).__init__()
@@ -36,6 +34,9 @@ class BlindDeconvolutionLayer(tf.keras.layers.Layer):
             name='blind_conv_kernel'
         )
 
+    def call(self, inputs):
+        outputs = tf.nn.conv2d(inputs, self.kernel, strides=self.strides, padding=self.padding.upper())
+        return outputs
     def call(self, inputs):
         outputs = tf.nn.conv2d(inputs, self.kernel, strides=self.strides, padding=self.padding.upper())
         return outputs
