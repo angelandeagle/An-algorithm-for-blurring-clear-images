@@ -26,13 +26,45 @@ class BlindDeconvolutionLayer(tf.keras.layers.Layer):
         self.kernel_size = kernel_size
         self.strides = strides
         self.padding = padding
-
     def build(self, input_shape):
+        # 初始化卷积核
         self.kernel = self.add_weight(
             shape=(self.kernel_size, self.kernel_size, input_shape[-1], self.filters),
             initializer='glorot_uniform',
             trainable=True,
             name='blind_conv_kernel'
+        )
+        # 初始化潜在的输入表示（如果输入也需要估计）
+        self.estimated_input = self.add_weight(
+            shape=input_shape,
+            initializer='glorot_uniform',
+            trainable=True,
+            name='estimated_input'
+        )
+    def call(self, inputs):
+        # 使用估计的输入和卷积核进行卷积操作
+        outputs = tf.nn.conv2d(self.estimated_input, self.kernel, strides=self.strides, padding=self.padding.upper())
+        return outputs
+```
+在盲卷积中，为了确保解的合理性和唯一性，通常会添加一些约束条件，例如卷积核的非负性约束、稀疏性约束等。可以在构建模型时添加这些约束
+```python
+from tensorflow.keras.constraints import NonNeg  # 示例：非负约束
+class BlindDeconvolutionLayer(tf.keras.layers.Layer):
+    def __init__(self, filters, kernel_size, strides=1, padding='same'):
+        super(BlindDeconvolutionLayer, self).__init__()
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.strides = strides
+        self.padding = padding
+
+    def build(self, input_shape):
+        # 添加约束条件的卷积核初始化
+        self.kernel = self.add_weight(
+            shape=(self.kernel_size, self.kernel_size, input_shape[-1], self.filters),
+            initializer='glorot_uniform',
+            trainable=True,
+            name='blind_conv_kernel',
+            constraint=NonNeg()  # 示例：非负约束
         )
 
     def call(self, inputs):
