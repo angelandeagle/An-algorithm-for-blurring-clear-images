@@ -8,3 +8,4 @@ y 是模糊图像(已知)。
 x 是清晰图像(未知，要恢复的)
 h 是卷积核(未知，要估计的)
 n 是噪声(通常假设为高斯白噪声)
+1[](https://github.com/angelandeagle/An-algorithm-for-blurring-clear-images/blob/main/%E5%8E%BB%E7%87%A5%E7%9F%A5%E8%AF%86/image.png)
