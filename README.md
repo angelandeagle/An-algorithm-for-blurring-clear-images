@@ -16,8 +16,8 @@ blind-NBFA 最终PSNR为22.03
 -h 是卷积核(未知，要估计的)。  
 -n 是噪声(通常假设为高斯白噪声)。  
 ![image](https://github.com/angelandeagle/An-algorithm-for-blurring-clear-images/blob/main/%E5%8E%BB%E7%87%A5%E7%9F%A5%E8%AF%86/image.png)
-简单的说，我们对这个模糊图片进行逆操作，就相当于对图片进行去燥。      
-对应模块代码：  
+简单的说，我们对这个模糊图片进行逆操作，就相当于对图片进行去噪。      
+对应模块代码（这是自定义卷积）：  
 ```python
 class BlindDeconvolutionLayer(tf.keras.layers.Layer):
     def __init__(self, filters, kernel_size, strides=1, padding='same'):
